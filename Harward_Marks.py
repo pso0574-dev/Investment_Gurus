@@ -440,38 +440,38 @@ def make_commentary() -> str:
     parts = []
 
     if regime == "Defensive":
-        parts.append("시장 스트레스가 높은 구간입니다. 하워드 막스 관점에서는 수익 극대화보다 생존과 선택성이 우선입니다.")
+        parts.append("The market is in a high-stress zone. From a Howard Marks perspective, survival and selectivity matter more than return maximization.")
     elif regime == "Neutral":
-        parts.append("시장은 극단적이지 않은 중립 구간입니다. 강한 확신 베팅보다 균형과 선별이 중요합니다.")
+        parts.append("The market is in a balanced zone. Positioning should remain disciplined, diversified, and selective.")
     elif regime == "Opportunistic":
-        parts.append("공포와 변동성이 기회로 전환될 수 있는 구간입니다. 단, 가격 대비 가치 확인이 필요합니다.")
+        parts.append("Fear and volatility may be creating opportunity. However, price-to-value discipline is still essential.")
     else:
-        parts.append("데이터가 충분하지 않아 현재 시장 국면 판별이 제한됩니다.")
+        parts.append("There is not enough data to classify the current market regime.")
 
     if pd.notna(yc_last):
         if yc_last < 0:
-            parts.append("장단기 금리차 역전은 향후 성장 둔화 신호로 해석될 수 있습니다.")
+            parts.append("An inverted yield curve may signal future growth slowdown.")
         else:
-            parts.append("장단기 금리차는 역전 상태가 아니어서 극단적 침체 신호는 완화된 상태입니다.")
+            parts.append("The yield curve is not inverted, which reduces recession-style stress compared with inversion periods.")
 
     if pd.notna(hy_last):
         if hy_last > 5.5:
-            parts.append("하이일드 스프레드 확대는 크레딧 시장이 리스크 프리미엄을 더 요구하고 있음을 의미합니다.")
+            parts.append("Wider high-yield spreads suggest credit markets are demanding a higher risk premium.")
         elif hy_last < 3.5:
-            parts.append("하이일드 스프레드가 낮아 시장 안도감이나 안일함이 반영되었을 수 있습니다.")
+            parts.append("Tight high-yield spreads may reflect market comfort or complacency.")
 
     if pd.notna(vix_last):
         if vix_last > 30:
-            parts.append("VIX가 높아 단기 공포와 불확실성이 큰 구간입니다.")
+            parts.append("A high VIX suggests elevated fear and short-term uncertainty.")
         elif vix_last < 18:
-            parts.append("VIX가 낮아 시장이 비교적 안도하는 구간일 수 있습니다.")
+            parts.append("A low VIX may indicate a relatively calm or complacent market environment.")
 
     if not spy_dd.empty:
         dd_last = latest_value(spy_dd)
         if dd_last < -15:
-            parts.append("주식시장이 이전 고점 대비 크게 밀려 장기 투자자에게는 관찰 가치가 높아진 구간입니다.")
+            parts.append("Equities are meaningfully below prior peaks, which may increase screening interest for long-term investors.")
         elif dd_last < -8:
-            parts.append("주식시장이 중간 수준 조정을 거치며 미래 기대수익률이 다소 개선될 수 있습니다.")
+            parts.append("Equities have experienced a moderate correction, potentially improving future expected returns.")
 
     return " ".join(parts)
 
@@ -504,35 +504,27 @@ def build_watchlist_table(price_df: pd.DataFrame, tickers: List[str]) -> pd.Data
         dist_50 = distance_from_ma(s, 50)
         dist_200 = distance_from_ma(s, 200)
 
-        # Opportunity score per ticker
         ticker_score = 0.0
 
-        # Larger drawdown => more interesting
         if pd.notna(dd_last):
             ticker_score += min(40, abs(min(0, dd_last)) * 1.2)
 
-        # Below 200DMA => more dislocated
         if pd.notna(dist_200) and dist_200 < 0:
             ticker_score += min(20, abs(dist_200) * 0.8)
 
-        # Short-term weakness
         if pd.notna(ret_3m) and ret_3m < 0:
             ticker_score += min(15, abs(ret_3m) * 0.4)
 
-        # Avoid too-hot momentum
         if pd.notna(ret_6m) and ret_6m > 30:
             ticker_score -= 8
 
-        # Higher vol = more risk but potentially more opportunity
         if pd.notna(vol_3m):
             ticker_score += min(10, vol_3m * 0.15)
 
-        # Bonus if above 50DMA improving from weak long-term base
         if pd.notna(dist_50) and pd.notna(dist_200):
             if dist_50 > 0 and dist_200 < 0:
                 ticker_score += 8
 
-        # Penalty if way above both averages
         if pd.notna(dist_50) and pd.notna(dist_200):
             if dist_50 > 10 and dist_200 > 15:
                 ticker_score -= 10
@@ -722,10 +714,10 @@ with tab4:
     st.markdown(
         """
 **Reading guide**
-- **Defensive**: quality, patience, liquidity 확보
-- **Neutral**: 균형 유지, 무리한 추격 금지
-- **Opportunistic**: 공포 확대 시 분할매수 우선
-- 이 비중은 **교육용 힌트**이며 개인 자산 규모/세금/통화 노출은 별도로 조정해야 합니다.
+- **Defensive**: focus on quality, patience, and liquidity
+- **Neutral**: stay balanced and avoid chasing
+- **Opportunistic**: scale in gradually when fear expands
+- These weights are **educational hints**, not personalized investment advice
 """
     )
 
@@ -782,13 +774,13 @@ with tab6:
             """
 #### Suggested stance
 - Reduce aggressive beta exposure
-- Prefer quality balance sheets
+- Prefer strong balance sheets
 - Avoid expensive narratives
 - Maintain dry powder
 - Watch credit stress carefully
 
 #### Practical reading
-이 구간에서는 공격보다 방어가 먼저입니다. 다만 급락이 심한 우량주가 나타나면 감시 목록을 강화할 시기입니다.
+This is a time to protect capital first. Still, sharp dislocations in high-quality names may justify selective accumulation.
 """
         )
     elif regime == "Neutral":
@@ -802,7 +794,7 @@ with tab6:
 - Let valuation guide position sizing
 
 #### Practical reading
-강한 확신 베팅보다는 포트폴리오의 질을 유지하면서 약세 구간에 천천히 비중을 늘리는 접근이 좋습니다.
+This is not an environment for extreme positioning. Build quality exposure gradually and stay disciplined.
 """
         )
     elif regime == "Opportunistic":
@@ -810,13 +802,13 @@ with tab6:
             """
 #### Suggested stance
 - Screen forced-selling opportunities
-- Scale in gradually, not all-in
+- Scale in gradually, not all at once
 - Prefer quality companies with strong cash flows
 - Buy fear, but only with valuation discipline
 - Monitor whether macro stress is stabilizing
 
 #### Practical reading
-공포는 기회가 될 수 있지만, 싼 이유가 영구 훼손인지 일시적 과민반응인지 구분해야 합니다.
+Fear can create opportunity, but it is critical to distinguish temporary panic from permanent business deterioration.
 """
         )
     else:
@@ -827,14 +819,14 @@ with tab6:
             "Is fear high?",
             "Are credit spreads widening?",
             "Is the market already pricing bad news?",
-            "Is the business quality still intact?",
+            "Is business quality still intact?",
             "Can I scale in instead of betting all at once?"
         ],
         "Why It Matters": [
             "Fear creates dislocations.",
             "Credit often leads equity stress.",
             "Price vs value is the core question.",
-            "A weak balance sheet breaks first.",
+            "Weak balance sheets break first.",
             "Gradual entries reduce timing risk."
         ]
     })
@@ -853,9 +845,9 @@ st.markdown(
   - controlling risk,
   - comparing price vs value,
   - and acting rationally when others are emotional.
-- Best used together with your own:
-  - macro dashboard,
-  - MDD screen,
+- Best used together with:
+  - a macro dashboard,
+  - an MDD screen,
   - quality / ROE / FCF analysis,
   - and staged buying rules.
 """
