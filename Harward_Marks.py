@@ -1,25 +1,23 @@
 # streamlit_app.py
 # ============================================================
-# Howard Marks Style Pro Dashboard
-# - Macro regime / risk / opportunity / action signal
-# - Asset allocation hint
-# - Watchlist screener for dislocation opportunities
-#
-# Install:
-#   pip install streamlit pandas numpy plotly requests yfinance
+# Howard Marks Hybrid Quant Dashboard
+# - FRED Macro + Quant Screener + Portfolio Builder
+# - Concept:
+#   Howard Marks = Cycle + Risk Control + Contrarian + Value
 #
 # Run:
 #   streamlit run streamlit_app.py
 #
-# Optional:
-#   export FRED_API_KEY="YOUR_KEY"
+# Install:
+#   pip install streamlit pandas numpy yfinance plotly requests
 # ============================================================
 
 from __future__ import annotations
 
-import os
-from datetime import datetime
-from typing import Dict, List, Tuple
+import math
+import time
+from datetime import datetime, timedelta
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -29,826 +27,937 @@ import streamlit as st
 import yfinance as yf
 
 # ============================================================
-# Page Config
+# Page config
 # ============================================================
 st.set_page_config(
-    page_title="Howard Marks Pro Dashboard",
-    page_icon="📉",
+    page_title="Howard Marks Hybrid Quant Dashboard",
+    page_icon="📊",
     layout="wide",
 )
 
-st.title("📉 Howard Marks Pro Dashboard")
-st.caption("Cycle / Risk / Opportunity / Allocation / Watchlist")
+st.title("📊 Howard Marks Hybrid Quant Dashboard")
+st.caption(
+    "FRED Macro + Value + Quality + Risk + Contrarian + Momentum"
+)
+
+# ============================================================
+# Constants
+# ============================================================
+FRED_SERIES = {
+    "DGS10": "10Y Treasury Yield",
+    "DGS2": "2Y Treasury Yield",
+    "FEDFUNDS": "Fed Funds Rate",
+    "BAMLH0A0HYM2": "US High Yield Spread",
+    "VIXCLS": "VIX Index",
+    "UNRATE": "Unemployment Rate",
+    "CPIAUCSL": "CPI",
+}
+
+DEFAULT_UNIVERSE = [
+    "AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "AVGO", "TSLA",
+    "COST", "NFLX", "AMD", "ADBE", "INTU", "QCOM", "AMGN", "TXN",
+    "ISRG", "BKNG", "PANW", "CRWD", "PLTR", "APP", "VRSK", "LRCX",
+    "KLAC", "MU", "ANET", "MELI", "ASML", "CSCO", "ADP", "CMCSA",
+    "PEP", "LIN", "TMUS", "VRTX", "MDLZ", "GILD", "ADI", "ABNB",
+]
+
+MACRO_SERIES_ORDER = ["DGS10", "DGS2", "FEDFUNDS", "BAMLH0A0HYM2", "VIXCLS", "UNRATE", "CPIAUCSL"]
 
 # ============================================================
 # Sidebar
 # ============================================================
 st.sidebar.header("Settings")
 
-lookback_years = st.sidebar.slider("Lookback Years", 3, 20, 10)
-refresh_button = st.sidebar.button("Refresh Data")
-
-watchlist_default = [
-    "AAPL", "MSFT", "GOOGL", "AMZN", "META", "NVDA", "TSLA",
-    "AVGO", "NFLX", "AMD", "ADBE", "CRM", "PLTR", "VRSK",
-    "COST", "QQQ", "SPY", "IWM", "SMH", "SOXX"
-]
-
-watchlist_text = st.sidebar.text_area(
-    "Watchlist Tickers (comma separated)",
-    value=", ".join(watchlist_default),
-    height=140
+universe_mode = st.sidebar.selectbox(
+    "Universe mode",
+    ["Default large-cap universe", "Manual tickers"],
+    index=0,
 )
 
-show_top_n = st.sidebar.slider("Top Watchlist Rows", 5, 30, 12)
+manual_tickers = st.sidebar.text_area(
+    "Manual tickers (comma-separated)",
+    value="AAPL,MSFT,NVDA,AMZN,GOOGL,META,AVGO,TSLA,COST,NFLX,PLTR,APP,VRSK",
+    height=100,
+)
 
-# ============================================================
-# Constants
-# ============================================================
-FRED_API_KEY = os.getenv("FRED_API_KEY", "")
-TODAY = pd.Timestamp.today().normalize()
-START_DATE = TODAY - pd.DateOffset(years=lookback_years)
+top_n = st.sidebar.slider("Top N portfolio candidates", 5, 20, 10)
+price_period = st.sidebar.selectbox("Price history period", ["2y", "3y", "5y"], index=1)
 
-FRED_SERIES = {
-    "T10Y2Y": "10Y-2Y Treasury Spread",
-    "BAMLH0A0HYM2": "US High Yield Spread",
-    "VIXCLS": "VIX",
-    "NFCI": "Chicago Fed NFCI",
-    "FEDFUNDS": "Fed Funds Rate",
-    "UNRATE": "Unemployment Rate",
-    "CPIAUCSL": "CPI",
+st.sidebar.markdown("---")
+st.sidebar.subheader("Factor weights")
+
+w_value = st.sidebar.slider("Value", 0.0, 1.0, 0.25, 0.05)
+w_quality = st.sidebar.slider("Quality", 0.0, 1.0, 0.20, 0.05)
+w_risk = st.sidebar.slider("Risk", 0.0, 1.0, 0.20, 0.05)
+w_contrarian = st.sidebar.slider("Contrarian", 0.0, 1.0, 0.15, 0.05)
+w_momentum = st.sidebar.slider("Momentum", 0.0, 1.0, 0.15, 0.05)
+w_macro = st.sidebar.slider("Macro", 0.0, 1.0, 0.05, 0.05)
+
+weight_sum = w_value + w_quality + w_risk + w_contrarian + w_momentum + w_macro
+if weight_sum <= 0:
+    weight_sum = 1.0
+
+weights = {
+    "value": w_value / weight_sum,
+    "quality": w_quality / weight_sum,
+    "risk": w_risk / weight_sum,
+    "contrarian": w_contrarian / weight_sum,
+    "momentum": w_momentum / weight_sum,
+    "macro": w_macro / weight_sum,
 }
 
-ASSET_TICKERS = ["SPY", "QQQ", "TLT", "GLD", "UUP"]
-USER_WATCHLIST = [x.strip().upper() for x in watchlist_text.split(",") if x.strip()]
+st.sidebar.markdown("---")
+st.sidebar.subheader("Risk controls")
 
-# ============================================================
-# Cache Refresh
-# ============================================================
-if refresh_button:
-    st.cache_data.clear()
-    st.success("Cache cleared.")
+max_allowed_vol = st.sidebar.slider("Max annualized volatility", 0.10, 1.00, 0.45, 0.01)
+min_roe = st.sidebar.slider("Min ROE (if available)", -0.20, 0.50, 0.05, 0.01)
+min_market_cap_b = st.sidebar.slider("Min market cap (B USD, if available)", 0, 1000, 10, 5)
+
+run_button = st.sidebar.button("Run analysis", type="primary")
 
 # ============================================================
 # Helpers
 # ============================================================
-@st.cache_data(ttl=3600, show_spinner=False)
-def fetch_fred_series(series_id: str, start_date: pd.Timestamp) -> pd.DataFrame:
-    url = "https://api.stlouisfed.org/fred/series/observations"
-    params = {
-        "series_id": series_id,
-        "api_key": FRED_API_KEY,
-        "file_type": "json",
-        "observation_start": start_date.strftime("%Y-%m-%d"),
-    }
-    r = requests.get(url, params=params, timeout=30)
+def parse_tickers(mode: str, manual_text: str) -> List[str]:
+    if mode == "Default large-cap universe":
+        tickers = DEFAULT_UNIVERSE
+    else:
+        tickers = [x.strip().upper() for x in manual_text.split(",") if x.strip()]
+    # deduplicate while preserving order
+    seen = set()
+    out = []
+    for t in tickers:
+        if t not in seen:
+            seen.add(t)
+            out.append(t)
+    return out
+
+
+def fred_csv_url(series_id: str) -> str:
+    return f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={series_id}"
+
+
+@st.cache_data(ttl=60 * 60)
+def fetch_fred_series(series_id: str) -> pd.Series:
+    url = fred_csv_url(series_id)
+    r = requests.get(url, timeout=20)
     r.raise_for_status()
-    data = r.json()
+    df = pd.read_csv(pd.compat.StringIO(r.text)) if hasattr(pd, "compat") and hasattr(pd.compat, "StringIO") else pd.read_csv(pd.io.common.StringIO(r.text))
+    df.columns = ["DATE", series_id]
+    df["DATE"] = pd.to_datetime(df["DATE"])
+    df[series_id] = pd.to_numeric(df[series_id], errors="coerce")
+    s = df.set_index("DATE")[series_id].dropna()
+    return s
 
-    obs = data.get("observations", [])
-    if not obs:
-        return pd.DataFrame(columns=["date", "value"])
 
-    df = pd.DataFrame(obs)
-    df["date"] = pd.to_datetime(df["date"])
-    df["value"] = pd.to_numeric(df["value"], errors="coerce")
-    df = df[["date", "value"]].dropna()
+@st.cache_data(ttl=60 * 60)
+def fetch_all_fred() -> pd.DataFrame:
+    data = {}
+    for sid in MACRO_SERIES_ORDER:
+        try:
+            data[sid] = fetch_fred_series(sid)
+        except Exception:
+            data[sid] = pd.Series(dtype=float)
+    df = pd.concat(data, axis=1).sort_index()
     return df
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
-def fetch_prices(tickers: List[str], start_date: pd.Timestamp) -> pd.DataFrame:
+@st.cache_data(ttl=60 * 30)
+def fetch_prices(tickers: List[str], period: str) -> pd.DataFrame:
     if not tickers:
         return pd.DataFrame()
-
     data = yf.download(
         tickers=tickers,
-        start=start_date.strftime("%Y-%m-%d"),
+        period=period,
+        interval="1d",
         auto_adjust=True,
         progress=False,
         group_by="ticker",
         threads=True,
     )
 
-    close_df = pd.DataFrame()
-
     if len(tickers) == 1:
+        # yfinance returns flat columns for single ticker
+        close = data[["Close"]].copy()
+        close.columns = tickers
+        return close.dropna(how="all")
+
+    close_map = {}
+    for t in tickers:
         try:
-            close_df[tickers[0]] = data["Close"]
+            close_map[t] = data[t]["Close"]
         except Exception:
-            return pd.DataFrame()
-    else:
-        for t in tickers:
-            try:
-                close_df[t] = data[t]["Close"]
-            except Exception:
-                pass
+            pass
 
-    close_df = close_df.dropna(how="all")
-    return close_df
+    if not close_map:
+        return pd.DataFrame()
+
+    close = pd.DataFrame(close_map).dropna(how="all")
+    return close
 
 
-def latest_value(series: pd.Series) -> float:
-    s = series.dropna()
+@st.cache_data(ttl=60 * 60)
+def fetch_fundamentals(tickers: List[str]) -> pd.DataFrame:
+    rows = []
+    for i, t in enumerate(tickers, start=1):
+        try:
+            tk = yf.Ticker(t)
+            info = tk.info if tk.info is not None else {}
+        except Exception:
+            info = {}
+
+        row = {
+            "ticker": t,
+            "name": info.get("longName"),
+            "sector": info.get("sector"),
+            "industry": info.get("industry"),
+            "marketCap": info.get("marketCap"),
+            "trailingPE": info.get("trailingPE"),
+            "forwardPE": info.get("forwardPE"),
+            "priceToBook": info.get("priceToBook"),
+            "returnOnEquity": info.get("returnOnEquity"),
+            "debtToEquity": info.get("debtToEquity"),
+            "enterpriseToEbitda": info.get("enterpriseToEbitda"),
+            "freeCashflow": info.get("freeCashflow"),
+            "currentPrice": info.get("currentPrice"),
+            "sharesOutstanding": info.get("sharesOutstanding"),
+            "recommendationKey": info.get("recommendationKey"),
+            "beta": info.get("beta"),
+        }
+
+        price = row["currentPrice"]
+        shares = row["sharesOutstanding"]
+        fcf = row["freeCashflow"]
+
+        if price and shares and fcf:
+            mcap = price * shares
+            row["fcfYield"] = fcf / mcap if mcap else np.nan
+        else:
+            row["fcfYield"] = np.nan
+
+        rows.append(row)
+
+    df = pd.DataFrame(rows)
+    return df
+
+
+def annualized_volatility(price_series: pd.Series) -> float:
+    rets = price_series.pct_change().dropna()
+    if len(rets) < 20:
+        return np.nan
+    return rets.std() * np.sqrt(252)
+
+
+def max_drawdown(price_series: pd.Series) -> float:
+    if price_series.dropna().empty:
+        return np.nan
+    wealth = price_series / price_series.dropna().iloc[0]
+    peak = wealth.cummax()
+    dd = wealth / peak - 1.0
+    return dd.min()
+
+
+def current_drawdown(price_series: pd.Series) -> float:
+    s = price_series.dropna()
     if s.empty:
         return np.nan
-    return float(s.iloc[-1])
+    peak = s.cummax().iloc[-1]
+    # wrong if using cummax last; use full running peak current comparison
+    running_peak = s.cummax()
+    return s.iloc[-1] / running_peak.iloc[-1] - 1.0
 
 
-def normalize_to_100(series: pd.Series) -> pd.Series:
-    s = series.dropna()
+def current_drawdown_from_peak(price_series: pd.Series) -> float:
+    s = price_series.dropna()
     if s.empty:
-        return series
-    return series / s.iloc[0] * 100.0
-
-
-def compute_drawdown(series: pd.Series) -> pd.Series:
-    s = series.dropna()
-    if s.empty:
-        return pd.Series(dtype=float)
-    peak = s.cummax()
-    return (s / peak - 1.0) * 100.0
-
-
-def percentile_rank_last(series: pd.Series, window: int = 756) -> float:
-    s = series.dropna()
-    if len(s) < 30:
         return np.nan
-    s = s.iloc[-window:] if len(s) >= window else s
-    last = s.iloc[-1]
-    return float((s <= last).mean() * 100.0)
+    peak = s.max()
+    return s.iloc[-1] / peak - 1.0
 
 
-def format_num(x: float, digits: int = 2) -> str:
-    if pd.isna(x):
-        return "N/A"
-    return f"{x:.{digits}f}"
-
-
-def risk_bucket(score: float) -> str:
-    if pd.isna(score):
-        return "Unknown"
-    if score >= 70:
-        return "Defensive"
-    elif score >= 45:
-        return "Neutral"
-    return "Opportunistic"
-
-
-def regime_color(regime: str) -> str:
-    if regime == "Defensive":
-        return "#d62728"
-    if regime == "Neutral":
-        return "#ff7f0e"
-    if regime == "Opportunistic":
-        return "#2ca02c"
-    return "#999999"
-
-
-def moving_average(series: pd.Series, window: int) -> pd.Series:
-    return series.rolling(window).mean()
-
-
-def annualized_volatility(series: pd.Series, window: int = 63) -> float:
+def rsi(series: pd.Series, window: int = 14) -> float:
     s = series.dropna()
-    if len(s) < window + 1:
+    if len(s) < window + 5:
         return np.nan
-    r = s.pct_change().dropna().iloc[-window:]
-    return float(r.std() * np.sqrt(252) * 100.0)
+    delta = s.diff()
+    up = delta.clip(lower=0)
+    down = -delta.clip(upper=0)
+    avg_up = up.rolling(window).mean()
+    avg_down = down.rolling(window).mean()
+    rs = avg_up / avg_down.replace(0, np.nan)
+    rsi_series = 100 - (100 / (1 + rs))
+    return float(rsi_series.iloc[-1])
 
 
-def total_return(series: pd.Series, days: int) -> float:
-    s = series.dropna()
+def total_return(price_series: pd.Series, days: int) -> float:
+    s = price_series.dropna()
     if len(s) < days + 1:
         return np.nan
-    return float((s.iloc[-1] / s.iloc[-days - 1] - 1.0) * 100.0)
+    return s.iloc[-1] / s.iloc[-days - 1] - 1.0
 
 
-def distance_from_ma(series: pd.Series, window: int) -> float:
-    s = series.dropna()
-    if len(s) < window:
+def ma_gap(price_series: pd.Series, window: int) -> float:
+    s = price_series.dropna()
+    if len(s) < window + 1:
         return np.nan
     ma = s.rolling(window).mean().iloc[-1]
     if pd.isna(ma) or ma == 0:
         return np.nan
-    return float((s.iloc[-1] / ma - 1.0) * 100.0)
+    return s.iloc[-1] / ma - 1.0
 
 
-def line_chart(df: pd.DataFrame, title: str, y_title: str = "", height: int = 380) -> go.Figure:
-    fig = go.Figure()
+def safe_rank(series: pd.Series, ascending: bool = True) -> pd.Series:
+    s = series.copy()
+    rank = s.rank(pct=True, ascending=ascending)
+    return rank.fillna(0.5)
+
+
+def clip_series(s: pd.Series, low: float = None, high: float = None) -> pd.Series:
+    out = s.copy()
+    if low is not None:
+        out = out.clip(lower=low)
+    if high is not None:
+        out = out.clip(upper=high)
+    return out
+
+
+def compute_macro_state(fred_df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, float], str]:
+    df = fred_df.copy().sort_index()
+
+    # Forward-fill for alignment
+    df = df.ffill()
+
+    latest = {}
     for col in df.columns:
-        fig.add_trace(go.Scatter(
-            x=df.index,
-            y=df[col],
-            mode="lines",
-            name=col
-        ))
-    fig.update_layout(
-        title=title,
-        template="plotly_white",
-        height=height,
-        margin=dict(l=20, r=20, t=60, b=20),
-        hovermode="x unified",
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
-        xaxis_title="Date",
-        yaxis_title=y_title,
-    )
-    return fig
+        latest[col] = float(df[col].dropna().iloc[-1]) if not df[col].dropna().empty else np.nan
 
+    yc = latest.get("DGS10", np.nan) - latest.get("DGS2", np.nan)
+    hy = latest.get("BAMLH0A0HYM2", np.nan)
+    vix = latest.get("VIXCLS", np.nan)
+    fed = latest.get("FEDFUNDS", np.nan)
+    unrate = latest.get("UNRATE", np.nan)
 
-def bar_chart(df: pd.DataFrame, x_col: str, y_col: str, title: str, height: int = 420) -> go.Figure:
-    fig = go.Figure()
-    fig.add_trace(go.Bar(
-        x=df[x_col],
-        y=df[y_col],
-        text=df[y_col].round(1),
-        textposition="outside",
-        name=y_col
-    ))
-    fig.update_layout(
-        title=title,
-        template="plotly_white",
-        height=height,
-        margin=dict(l=20, r=20, t=60, b=20),
-        xaxis_title="",
-        yaxis_title=y_col,
-    )
-    return fig
+    score = 0
 
+    if not np.isnan(yc):
+        if yc < 0:
+            score += 3
+        elif yc < 0.5:
+            score += 2
+        elif yc < 1.0:
+            score += 1
 
-# ============================================================
-# Load FRED
-# ============================================================
-with st.spinner("Loading FRED macro data..."):
-    fred_raw: Dict[str, pd.DataFrame] = {}
-    for sid in FRED_SERIES.keys():
-        try:
-            fred_raw[sid] = fetch_fred_series(sid, START_DATE)
-        except Exception:
-            fred_raw[sid] = pd.DataFrame(columns=["date", "value"])
+    if not np.isnan(hy):
+        if hy > 6:
+            score += 3
+        elif hy > 4.5:
+            score += 2
+        elif hy > 3.5:
+            score += 1
 
-fred = {}
-for sid, df in fred_raw.items():
-    if not df.empty:
-        fred[sid] = df.set_index("date")["value"].sort_index()
+    if not np.isnan(vix):
+        if vix > 35:
+            score += 3
+        elif vix > 25:
+            score += 2
+        elif vix > 20:
+            score += 1
+
+    if not np.isnan(fed):
+        if fed > 5:
+            score += 2
+        elif fed > 3:
+            score += 1
+
+    if not np.isnan(unrate):
+        if unrate > 5:
+            score += 2
+        elif unrate > 4.2:
+            score += 1
+
+    # Regime
+    if score >= 9:
+        regime = "Risk-Off"
+    elif score >= 5:
+        regime = "Cautious"
     else:
-        fred[sid] = pd.Series(dtype=float)
+        regime = "Risk-On"
 
-# ============================================================
-# Load Prices
-# ============================================================
-all_tickers = sorted(list(set(ASSET_TICKERS + USER_WATCHLIST)))
+    macro = {
+        "yield_curve_spread": yc,
+        "high_yield_spread": hy,
+        "vix": vix,
+        "fed_funds": fed,
+        "unemployment": unrate,
+        "macro_risk_score": score,
+    }
+    return df, macro, regime
 
-with st.spinner("Loading market prices..."):
-    prices = fetch_prices(all_tickers, START_DATE)
 
-# ============================================================
-# Core Series
-# ============================================================
-yc = fred.get("T10Y2Y", pd.Series(dtype=float))
-hy = fred.get("BAMLH0A0HYM2", pd.Series(dtype=float))
-vix = fred.get("VIXCLS", pd.Series(dtype=float))
-nfci = fred.get("NFCI", pd.Series(dtype=float))
-fedfunds = fred.get("FEDFUNDS", pd.Series(dtype=float))
-unrate = fred.get("UNRATE", pd.Series(dtype=float))
-cpi = fred.get("CPIAUCSL", pd.Series(dtype=float))
-
-if not cpi.empty:
-    cpi_yoy = cpi.pct_change(12) * 100.0
-    cpi_yoy.name = "CPI YoY"
-else:
-    cpi_yoy = pd.Series(dtype=float)
-
-# ============================================================
-# Risk Score
-# ============================================================
-risk_components: List[Tuple[str, float, float]] = []
-
-yc_last = latest_value(yc)
-if pd.notna(yc_last):
-    yc_risk = 100 if yc_last < 0 else max(0, min(100, 50 - yc_last * 20))
-    risk_components.append(("Yield Curve", yc_risk, yc_last))
-
-hy_last = latest_value(hy)
-hy_pct = percentile_rank_last(hy, 756) if not hy.empty else np.nan
-if pd.notna(hy_pct):
-    risk_components.append(("HY Spread", hy_pct, hy_last))
-
-vix_last = latest_value(vix)
-vix_pct = percentile_rank_last(vix, 756) if not vix.empty else np.nan
-if pd.notna(vix_pct):
-    risk_components.append(("VIX", vix_pct, vix_last))
-
-nfci_last = latest_value(nfci)
-nfci_pct = percentile_rank_last(nfci, 756) if not nfci.empty else np.nan
-if pd.notna(nfci_pct):
-    risk_components.append(("Financial Conditions", nfci_pct, nfci_last))
-
-if "SPY" in prices.columns:
-    spy_dd = compute_drawdown(prices["SPY"])
-    spy_dd_last = abs(latest_value(spy_dd))
-    dd_risk = min(100, spy_dd_last * 3.0)
-    risk_components.append(("SPY Drawdown", dd_risk, latest_value(spy_dd)))
-else:
-    spy_dd = pd.Series(dtype=float)
-
-if risk_components:
-    risk_score = float(np.mean([x[1] for x in risk_components]))
-else:
-    risk_score = np.nan
-
-regime = risk_bucket(risk_score)
-
-# ============================================================
-# Opportunity Score
-# ============================================================
-opportunity_parts = []
-
-if not spy_dd.empty:
-    opportunity_parts.append(min(100, abs(latest_value(spy_dd)) * 4.0))
-
-if pd.notna(vix_pct):
-    opportunity_parts.append(vix_pct)
-
-if pd.notna(hy_pct):
-    opportunity_parts.append(hy_pct)
-
-curve_penalty = 0
-if pd.notna(yc_last):
-    if yc_last < -0.5:
-        curve_penalty = 30
-    elif yc_last < 0:
-        curve_penalty = 10
-
-if opportunity_parts:
-    opportunity_score = max(0.0, min(100.0, float(np.mean(opportunity_parts)) - curve_penalty))
-else:
-    opportunity_score = np.nan
-
-# ============================================================
-# Action Signal
-# ============================================================
-def get_action_signal(regime_name: str, opp_score: float) -> str:
-    if regime_name == "Defensive":
-        if pd.notna(opp_score) and opp_score >= 70:
-            return "Selective Accumulation"
-        return "Capital Preservation"
-    elif regime_name == "Neutral":
-        if pd.notna(opp_score) and opp_score >= 65:
-            return "Build Watchlist / Scale In"
-        return "Balanced Positioning"
-    else:
-        if pd.notna(opp_score) and opp_score >= 60:
-            return "Aggressive Watchlist Accumulation"
-        return "Selective Opportunity Hunting"
-
-action_signal = get_action_signal(regime, opportunity_score)
-
-# ============================================================
-# Allocation Hint
-# ============================================================
-def get_allocation_hint(regime_name: str, opp_score: float) -> pd.DataFrame:
-    if regime_name == "Defensive":
-        data = {
-            "Asset": ["SPY/QQQ", "TLT", "GLD", "Cash"],
-            "Suggested Weight (%)": [20, 30, 20, 30]
-        }
-    elif regime_name == "Neutral":
-        data = {
-            "Asset": ["SPY/QQQ", "TLT", "GLD", "Cash"],
-            "Suggested Weight (%)": [45, 20, 15, 20]
-        }
-    else:
-        if pd.notna(opp_score) and opp_score >= 60:
-            data = {
-                "Asset": ["SPY/QQQ", "TLT", "GLD", "Cash"],
-                "Suggested Weight (%)": [60, 15, 10, 15]
-            }
-        else:
-            data = {
-                "Asset": ["SPY/QQQ", "TLT", "GLD", "Cash"],
-                "Suggested Weight (%)": [50, 20, 10, 20]
-            }
-    return pd.DataFrame(data)
-
-allocation_df = get_allocation_hint(regime, opportunity_score)
-
-# ============================================================
-# Commentary
-# ============================================================
-def make_commentary() -> str:
-    parts = []
-
-    if regime == "Defensive":
-        parts.append("The market is in a high-stress zone. From a Howard Marks perspective, survival and selectivity matter more than return maximization.")
-    elif regime == "Neutral":
-        parts.append("The market is in a balanced zone. Positioning should remain disciplined, diversified, and selective.")
-    elif regime == "Opportunistic":
-        parts.append("Fear and volatility may be creating opportunity. However, price-to-value discipline is still essential.")
-    else:
-        parts.append("There is not enough data to classify the current market regime.")
-
-    if pd.notna(yc_last):
-        if yc_last < 0:
-            parts.append("An inverted yield curve may signal future growth slowdown.")
-        else:
-            parts.append("The yield curve is not inverted, which reduces recession-style stress compared with inversion periods.")
-
-    if pd.notna(hy_last):
-        if hy_last > 5.5:
-            parts.append("Wider high-yield spreads suggest credit markets are demanding a higher risk premium.")
-        elif hy_last < 3.5:
-            parts.append("Tight high-yield spreads may reflect market comfort or complacency.")
-
-    if pd.notna(vix_last):
-        if vix_last > 30:
-            parts.append("A high VIX suggests elevated fear and short-term uncertainty.")
-        elif vix_last < 18:
-            parts.append("A low VIX may indicate a relatively calm or complacent market environment.")
-
-    if not spy_dd.empty:
-        dd_last = latest_value(spy_dd)
-        if dd_last < -15:
-            parts.append("Equities are meaningfully below prior peaks, which may increase screening interest for long-term investors.")
-        elif dd_last < -8:
-            parts.append("Equities have experienced a moderate correction, potentially improving future expected returns.")
-
-    return " ".join(parts)
-
-commentary = make_commentary()
-
-# ============================================================
-# Watchlist Screener
-# ============================================================
-def build_watchlist_table(price_df: pd.DataFrame, tickers: List[str]) -> pd.DataFrame:
-    rows = []
-
-    for ticker in tickers:
-        if ticker not in price_df.columns:
-            continue
-
-        s = price_df[ticker].dropna()
-        if len(s) < 210:
-            continue
-
-        last_price = s.iloc[-1]
-        dd = compute_drawdown(s)
-        dd_last = latest_value(dd)
-
-        ma50 = moving_average(s, 50).iloc[-1]
-        ma200 = moving_average(s, 200).iloc[-1]
-        ret_1m = total_return(s, 21)
-        ret_3m = total_return(s, 63)
-        ret_6m = total_return(s, 126)
-        vol_3m = annualized_volatility(s, 63)
-        dist_50 = distance_from_ma(s, 50)
-        dist_200 = distance_from_ma(s, 200)
-
-        ticker_score = 0.0
-
-        if pd.notna(dd_last):
-            ticker_score += min(40, abs(min(0, dd_last)) * 1.2)
-
-        if pd.notna(dist_200) and dist_200 < 0:
-            ticker_score += min(20, abs(dist_200) * 0.8)
-
-        if pd.notna(ret_3m) and ret_3m < 0:
-            ticker_score += min(15, abs(ret_3m) * 0.4)
-
-        if pd.notna(ret_6m) and ret_6m > 30:
-            ticker_score -= 8
-
-        if pd.notna(vol_3m):
-            ticker_score += min(10, vol_3m * 0.15)
-
-        if pd.notna(dist_50) and pd.notna(dist_200):
-            if dist_50 > 0 and dist_200 < 0:
-                ticker_score += 8
-
-        if pd.notna(dist_50) and pd.notna(dist_200):
-            if dist_50 > 10 and dist_200 > 15:
-                ticker_score -= 10
-
-        ticker_score = max(0, min(100, ticker_score))
-
-        rows.append({
-            "Ticker": ticker,
-            "Price": last_price,
-            "Drawdown %": dd_last,
-            "1M Return %": ret_1m,
-            "3M Return %": ret_3m,
-            "6M Return %": ret_6m,
-            "Dist vs 50DMA %": dist_50,
-            "Dist vs 200DMA %": dist_200,
-            "3M Vol %": vol_3m,
-            "Opportunity Score": ticker_score,
-        })
-
-    if not rows:
+def compute_quant_table(prices: pd.DataFrame, fundamentals: pd.DataFrame, macro_score: float) -> pd.DataFrame:
+    if prices.empty:
         return pd.DataFrame()
 
-    df = pd.DataFrame(rows)
-    df = df.sort_values("Opportunity Score", ascending=False).reset_index(drop=True)
+    rows = []
+    for t in prices.columns:
+        s = prices[t].dropna()
+        if len(s) < 120:
+            continue
+
+        vol = annualized_volatility(s)
+        mdd = max_drawdown(s)
+        cdd = current_drawdown_from_peak(s)
+        rsi14 = rsi(s, 14)
+        ret_6m = total_return(s, 126)
+        ret_12m = total_return(s, 252)
+        gap_50 = ma_gap(s, 50)
+        gap_200 = ma_gap(s, 200)
+
+        rows.append({
+            "ticker": t,
+            "last_price": s.iloc[-1],
+            "ann_vol": vol,
+            "max_drawdown": mdd,
+            "current_drawdown": cdd,
+            "rsi14": rsi14,
+            "ret_6m": ret_6m,
+            "ret_12m": ret_12m,
+            "gap_50ma": gap_50,
+            "gap_200ma": gap_200,
+        })
+
+    qdf = pd.DataFrame(rows)
+    if qdf.empty:
+        return qdf
+
+    df = qdf.merge(fundamentals, on="ticker", how="left")
+
+    # Clean / clip outliers
+    df["trailingPE"] = clip_series(pd.to_numeric(df["trailingPE"], errors="coerce"), 0, 200)
+    df["forwardPE"] = clip_series(pd.to_numeric(df["forwardPE"], errors="coerce"), 0, 200)
+    df["priceToBook"] = clip_series(pd.to_numeric(df["priceToBook"], errors="coerce"), 0, 50)
+    df["returnOnEquity"] = clip_series(pd.to_numeric(df["returnOnEquity"], errors="coerce"), -1, 2)
+    df["debtToEquity"] = clip_series(pd.to_numeric(df["debtToEquity"], errors="coerce"), 0, 1000)
+    df["enterpriseToEbitda"] = clip_series(pd.to_numeric(df["enterpriseToEbitda"], errors="coerce"), -50, 100)
+    df["fcfYield"] = clip_series(pd.to_numeric(df["fcfYield"], errors="coerce"), -1, 1)
+    df["marketCap"] = pd.to_numeric(df["marketCap"], errors="coerce")
+    df["beta"] = pd.to_numeric(df["beta"], errors="coerce")
+
+    # Factor scores
+    # Lower valuation multiples = better
+    pe_combo = df[["trailingPE", "forwardPE"]].mean(axis=1, skipna=True)
+    pb = df["priceToBook"]
+    ev_ebitda = df["enterpriseToEbitda"]
+    fcfy = df["fcfYield"]
+
+    value_score = (
+        0.30 * safe_rank(pe_combo, ascending=True) +
+        0.20 * safe_rank(pb, ascending=True) +
+        0.20 * safe_rank(ev_ebitda, ascending=True) +
+        0.30 * safe_rank(fcfy, ascending=False)
+    )
+
+    quality_score = (
+        0.55 * safe_rank(df["returnOnEquity"], ascending=False) +
+        0.25 * safe_rank(df["debtToEquity"], ascending=True) +
+        0.20 * safe_rank(df["marketCap"], ascending=False)
+    )
+
+    risk_score = (
+        0.45 * safe_rank(df["ann_vol"], ascending=True) +
+        0.35 * safe_rank(df["max_drawdown"], ascending=False) +  # less negative is better
+        0.20 * safe_rank(df["beta"], ascending=True)
+    )
+
+    # Contrarian: Howard Marks style
+    # Better when drawdown is meaningful but not collapsing forever
+    # Prefer current drawdown and lower RSI
+    drawdown_abs = -df["current_drawdown"]
+    contrarian_score = (
+        0.60 * safe_rank(drawdown_abs, ascending=False) +
+        0.40 * safe_rank(df["rsi14"], ascending=True)
+    )
+
+    momentum_score = (
+        0.30 * safe_rank(df["ret_6m"], ascending=False) +
+        0.25 * safe_rank(df["ret_12m"], ascending=False) +
+        0.20 * safe_rank(df["gap_50ma"], ascending=False) +
+        0.25 * safe_rank(df["gap_200ma"], ascending=False)
+    )
+
+    # Macro score is universe-wide: lower macro risk is better for gross exposure
+    macro_component = max(0.0, min(1.0, 1 - (macro_score / 12.0)))
+    df["macro_score_component"] = macro_component
+
+    df["value_score"] = value_score
+    df["quality_score"] = quality_score
+    df["risk_score"] = risk_score
+    df["contrarian_score"] = contrarian_score
+    df["momentum_score"] = momentum_score
+
+    df["hybrid_score"] = (
+        weights["value"] * df["value_score"] +
+        weights["quality"] * df["quality_score"] +
+        weights["risk"] * df["risk_score"] +
+        weights["contrarian"] * df["contrarian_score"] +
+        weights["momentum"] * df["momentum_score"] +
+        weights["macro"] * df["macro_score_component"]
+    )
+
+    # Filter flags
+    df["marketCapB"] = df["marketCap"] / 1e9
+    df["pass_vol"] = df["ann_vol"] <= max_allowed_vol
+    df["pass_roe"] = df["returnOnEquity"].isna() | (df["returnOnEquity"] >= min_roe)
+    df["pass_mcap"] = df["marketCapB"].isna() | (df["marketCapB"] >= min_market_cap_b)
+    df["pass_filters"] = df["pass_vol"] & df["pass_roe"] & df["pass_mcap"]
+
+    # Ranking
+    df = df.sort_values(["pass_filters", "hybrid_score"], ascending=[False, False]).reset_index(drop=True)
     return df
 
-watchlist_df = build_watchlist_table(prices, USER_WATCHLIST)
+
+def decide_positioning(regime: str, macro_score: float) -> Dict[str, float]:
+    if regime == "Risk-On":
+        return {
+            "equity": 0.90,
+            "cash": 0.10,
+        }
+    elif regime == "Cautious":
+        return {
+            "equity": 0.65,
+            "cash": 0.35,
+        }
+    else:
+        return {
+            "equity": 0.40,
+            "cash": 0.60,
+        }
+
+
+def build_portfolio(df: pd.DataFrame, top_n: int, regime: str) -> pd.DataFrame:
+    if df.empty:
+        return pd.DataFrame()
+
+    eligible = df[df["pass_filters"]].copy()
+    if eligible.empty:
+        eligible = df.copy()
+
+    portfolio = eligible.head(top_n).copy()
+
+    # Base weights proportional to score
+    scores = portfolio["hybrid_score"].clip(lower=0.0001)
+    w = scores / scores.sum()
+
+    alloc = decide_positioning(regime, float(df["macro_score_component"].iloc[0] if "macro_score_component" in df.columns else 0.5))
+    equity_alloc = alloc["equity"]
+
+    portfolio["target_weight"] = w * equity_alloc
+    portfolio["cash_buffer_note"] = f"Cash buffer = {1 - equity_alloc:.0%}"
+    return portfolio
+
+
+def format_pct(x):
+    return f"{x:.2%}" if pd.notna(x) else "-"
+
+
+def format_num(x, digits=2):
+    return f"{x:,.{digits}f}" if pd.notna(x) else "-"
+
+
+def make_price_chart(prices: pd.DataFrame, tickers: List[str], title: str) -> go.Figure:
+    fig = go.Figure()
+    for t in tickers:
+        if t in prices.columns:
+            s = prices[t].dropna()
+            if s.empty:
+                continue
+            norm = s / s.iloc[0] * 100
+            fig.add_trace(go.Scatter(x=norm.index, y=norm.values, mode="lines", name=t))
+    fig.update_layout(
+        title=title,
+        xaxis_title="Date",
+        yaxis_title="Indexed Price (Start=100)",
+        height=520,
+        legend_title="Ticker",
+    )
+    return fig
+
+
+def make_drawdown_chart(prices: pd.DataFrame, ticker: str) -> go.Figure:
+    s = prices[ticker].dropna()
+    running_peak = s.cummax()
+    dd = s / running_peak - 1.0
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=s.index, y=s.values, mode="lines", name=f"{ticker} Price"))
+    fig.add_trace(go.Scatter(x=running_peak.index, y=running_peak.values, mode="lines", name="Running Peak"))
+    fig2 = go.Figure()
+    fig2.add_trace(go.Scatter(x=dd.index, y=dd.values, mode="lines", name=f"{ticker} Drawdown"))
+    fig2.update_layout(
+        title=f"{ticker} Drawdown vs Previous Peak",
+        xaxis_title="Date",
+        yaxis_title="Drawdown",
+        height=420,
+    )
+    return fig, fig2
+
+
+def make_mva_chart(prices: pd.DataFrame, ticker: str) -> go.Figure:
+    s = prices[ticker].dropna()
+    ma50 = s.rolling(50).mean()
+    ma200 = s.rolling(200).mean()
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=s.index, y=s.values, mode="lines", name="Price"))
+    fig.add_trace(go.Scatter(x=ma50.index, y=ma50.values, mode="lines", name="MA50"))
+    fig.add_trace(go.Scatter(x=ma200.index, y=ma200.values, mode="lines", name="MA200"))
+    fig.update_layout(
+        title=f"{ticker} Price with MA50 / MA200",
+        xaxis_title="Date",
+        yaxis_title="Price",
+        height=420,
+    )
+    return fig
+
+
+def factor_interpretation(row: pd.Series, regime: str) -> str:
+    msgs = []
+
+    if pd.notna(row.get("current_drawdown")) and row["current_drawdown"] < -0.25:
+        msgs.append("deep pullback")
+    if pd.notna(row.get("rsi14")) and row["rsi14"] < 40:
+        msgs.append("oversold/contrarian")
+    if pd.notna(row.get("gap_200ma")) and row["gap_200ma"] > 0:
+        msgs.append("above 200MA")
+    if pd.notna(row.get("returnOnEquity")) and row["returnOnEquity"] > 0.15:
+        msgs.append("strong ROE")
+    if pd.notna(row.get("trailingPE")) and row["trailingPE"] < 25:
+        msgs.append("reasonable PE")
+    if pd.notna(row.get("ann_vol")) and row["ann_vol"] < 0.30:
+        msgs.append("controlled volatility")
+
+    if not msgs:
+        msgs.append("mixed factor profile")
+
+    regime_msg = {
+        "Risk-On": "macro backdrop supports broader equity exposure",
+        "Cautious": "macro backdrop suggests selective exposure",
+        "Risk-Off": "macro backdrop favors defense and cash discipline",
+    }.get(regime, "macro backdrop neutral")
+
+    return f"{', '.join(msgs)}; {regime_msg}."
+
 
 # ============================================================
-# Top Summary
+# Main execution
 # ============================================================
-c1, c2, c3, c4, c5 = st.columns(5)
+tickers = parse_tickers(universe_mode, manual_tickers)
 
-with c1:
-    st.metric("Risk Score", format_num(risk_score, 1))
-with c2:
-    st.metric("Opportunity Score", format_num(opportunity_score, 1))
-with c3:
-    st.metric("Regime", regime)
-with c4:
-    st.metric("Action Signal", action_signal)
-with c5:
-    st.metric("Updated", datetime.now().strftime("%Y-%m-%d %H:%M"))
+if run_button:
+    st.cache_data.clear()
 
-st.markdown(
-    f"""
-<div style="padding:14px;border-radius:12px;background-color:{regime_color(regime)}22;border:1px solid {regime_color(regime)};">
-<b>Howard Marks Interpretation</b><br>
-{commentary}
-</div>
-""",
-    unsafe_allow_html=True,
+with st.spinner("Loading macro, price, and fundamental data..."):
+    fred_df = fetch_all_fred()
+    macro_hist, macro_now, regime = compute_macro_state(fred_df)
+    prices = fetch_prices(tickers, price_period)
+    fundamentals = fetch_fundamentals(tickers)
+    quant_df = compute_quant_table(prices, fundamentals, macro_now["macro_risk_score"])
+    portfolio_df = build_portfolio(quant_df, top_n=top_n, regime=regime)
+
+# ============================================================
+# Top summary
+# ============================================================
+c1, c2, c3, c4, c5, c6 = st.columns(6)
+
+c1.metric("Regime", regime)
+c2.metric("Macro Risk Score", f'{macro_now["macro_risk_score"]:.0f}/12')
+c3.metric("10Y-2Y", format_num(macro_now["yield_curve_spread"], 2))
+c4.metric("HY Spread", format_num(macro_now["high_yield_spread"], 2))
+c5.metric("VIX", format_num(macro_now["vix"], 2))
+c6.metric("Fed Funds", format_num(macro_now["fed_funds"], 2))
+
+positioning = decide_positioning(regime, macro_now["macro_risk_score"])
+st.info(
+    f"Suggested positioning: Equity {positioning['equity']:.0%} / Cash {positioning['cash']:.0%} "
+    f"based on current macro regime = {regime}"
 )
-
-# ============================================================
-# Risk Components Table
-# ============================================================
-st.subheader("1. Risk Components")
-
-if risk_components:
-    risk_df = pd.DataFrame(risk_components, columns=["Component", "Risk Score", "Latest Value"])
-    risk_df["Risk Score"] = risk_df["Risk Score"].round(1)
-    risk_df["Latest Value"] = risk_df["Latest Value"].round(2)
-    st.dataframe(risk_df, use_container_width=True, hide_index=True)
-else:
-    st.warning("No risk component data available.")
 
 # ============================================================
 # Tabs
 # ============================================================
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
-    "Cycle",
-    "Credit & Fear",
-    "Equity Stress",
-    "Allocation",
-    "Watchlist Screener",
-    "Playbook"
-])
+tab1, tab2, tab3, tab4, tab5 = st.tabs(
+    ["Macro Dashboard", "Quant Screener", "Portfolio", "Chart Lab", "Raw Data"]
+)
 
 # ============================================================
-# Tab 1 - Cycle
+# Tab 1: Macro Dashboard
 # ============================================================
 with tab1:
-    st.markdown("### Market Cycle Indicators")
+    st.subheader("Howard Marks Macro Cycle Dashboard")
 
-    col1, col2 = st.columns(2)
+    macro_display = pd.DataFrame(
+        {
+            "Series": [
+                "10Y Treasury",
+                "2Y Treasury",
+                "10Y-2Y Spread",
+                "Fed Funds",
+                "High Yield Spread",
+                "VIX",
+                "Unemployment",
+            ],
+            "Latest": [
+                macro_hist["DGS10"].dropna().iloc[-1] if not macro_hist["DGS10"].dropna().empty else np.nan,
+                macro_hist["DGS2"].dropna().iloc[-1] if not macro_hist["DGS2"].dropna().empty else np.nan,
+                macro_now["yield_curve_spread"],
+                macro_now["fed_funds"],
+                macro_now["high_yield_spread"],
+                macro_now["vix"],
+                macro_now["unemployment"],
+            ],
+            "Interpretation": [
+                "Long-term growth / inflation expectation",
+                "Policy-sensitive short rate",
+                "Inversion = recession warning",
+                "Liquidity tightness proxy",
+                "Credit stress proxy",
+                "Fear / volatility proxy",
+                "Labor market stress",
+            ],
+        }
+    )
+    st.dataframe(macro_display, use_container_width=True, hide_index=True)
 
-    with col1:
-        if not yc.empty:
-            fig = line_chart(yc.to_frame("10Y-2Y Spread"), "Yield Curve (10Y - 2Y)", "Spread (%)")
-            fig.add_hline(y=0, line_dash="dash")
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.info("Yield curve data unavailable.")
+    col_a, col_b = st.columns(2)
 
-    with col2:
-        if not fedfunds.empty:
-            fig = line_chart(fedfunds.to_frame("Fed Funds Rate"), "Fed Funds Rate", "Rate (%)")
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.info("Fed funds data unavailable.")
+    with col_a:
+        fig_yc = go.Figure()
+        if "DGS10" in macro_hist and "DGS2" in macro_hist:
+            spread = macro_hist["DGS10"] - macro_hist["DGS2"]
+            fig_yc.add_trace(go.Scatter(x=spread.index, y=spread.values, mode="lines", name="10Y-2Y Spread"))
+            fig_yc.update_layout(
+                title="Yield Curve Spread (10Y - 2Y)",
+                xaxis_title="Date",
+                yaxis_title="Spread",
+                height=420,
+            )
+        st.plotly_chart(fig_yc, use_container_width=True)
 
-    col3, col4 = st.columns(2)
+    with col_b:
+        fig_hy = go.Figure()
+        if "BAMLH0A0HYM2" in macro_hist:
+            s = macro_hist["BAMLH0A0HYM2"].dropna()
+            fig_hy.add_trace(go.Scatter(x=s.index, y=s.values, mode="lines", name="HY Spread"))
+            fig_hy.update_layout(
+                title="US High Yield Spread",
+                xaxis_title="Date",
+                yaxis_title="Spread",
+                height=420,
+            )
+        st.plotly_chart(fig_hy, use_container_width=True)
 
-    with col3:
-        if not unrate.empty:
-            fig = line_chart(unrate.to_frame("Unemployment Rate"), "Unemployment Rate", "Rate (%)")
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.info("Unemployment data unavailable.")
+    col_c, col_d = st.columns(2)
 
-    with col4:
-        if not cpi_yoy.empty:
-            fig = line_chart(cpi_yoy.to_frame("CPI YoY"), "Inflation (CPI YoY)", "YoY (%)")
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.info("CPI data unavailable.")
+    with col_c:
+        fig_vix = go.Figure()
+        if "VIXCLS" in macro_hist:
+            s = macro_hist["VIXCLS"].dropna()
+            fig_vix.add_trace(go.Scatter(x=s.index, y=s.values, mode="lines", name="VIX"))
+            fig_vix.update_layout(
+                title="VIX",
+                xaxis_title="Date",
+                yaxis_title="Index",
+                height=420,
+            )
+        st.plotly_chart(fig_vix, use_container_width=True)
+
+    with col_d:
+        fig_ff = go.Figure()
+        if "FEDFUNDS" in macro_hist:
+            s = macro_hist["FEDFUNDS"].dropna()
+            fig_ff.add_trace(go.Scatter(x=s.index, y=s.values, mode="lines", name="Fed Funds"))
+            fig_ff.update_layout(
+                title="Fed Funds Rate",
+                xaxis_title="Date",
+                yaxis_title="Rate",
+                height=420,
+            )
+        st.plotly_chart(fig_ff, use_container_width=True)
+
+    st.markdown("### Macro interpretation")
+    if regime == "Risk-On":
+        st.success(
+            "Macro regime is Risk-On. Howard Marks 관점에서는 공격 가능 구간이지만, "
+            "여전히 리스크 관리와 분산이 중요합니다."
+        )
+    elif regime == "Cautious":
+        st.warning(
+            "Macro regime is Cautious. 선택적 매수, 높은 품질, 낮은 레버리지, "
+            "적절한 현금 비중이 유리합니다."
+        )
+    else:
+        st.error(
+            "Macro regime is Risk-Off. Howard Marks 관점에서는 현금, 방어, "
+            "손실 회피, 그리고 진짜 기회가 생길 때까지 기다리는 자세가 중요합니다."
+        )
 
 # ============================================================
-# Tab 2 - Credit & Fear
+# Tab 2: Quant Screener
 # ============================================================
 with tab2:
-    st.markdown("### Credit and Fear Indicators")
+    st.subheader("Hybrid Quant Screener")
 
-    col1, col2 = st.columns(2)
-
-    with col1:
-        if not hy.empty:
-            fig = line_chart(hy.to_frame("HY Spread"), "US High Yield Spread", "Spread (%)")
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.info("HY spread unavailable.")
-
-    with col2:
-        if not vix.empty:
-            fig = line_chart(vix.to_frame("VIX"), "VIX", "Level")
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.info("VIX unavailable.")
-
-    if not nfci.empty:
-        fig = line_chart(nfci.to_frame("NFCI"), "National Financial Conditions Index", "Index")
-        st.plotly_chart(fig, use_container_width=True)
+    if quant_df.empty:
+        st.warning("No screening results available.")
     else:
-        st.info("NFCI unavailable.")
+        screen_df = quant_df.copy()
+
+        sector_options = ["All"] + sorted([x for x in screen_df["sector"].dropna().unique()])
+        selected_sector = st.selectbox("Sector filter", sector_options, index=0)
+
+        pass_only = st.checkbox("Show pass-filters only", value=True)
+
+        if selected_sector != "All":
+            screen_df = screen_df[screen_df["sector"] == selected_sector]
+
+        if pass_only:
+            tmp = screen_df[screen_df["pass_filters"]]
+            if not tmp.empty:
+                screen_df = tmp
+
+        show_cols = [
+            "ticker", "name", "sector", "industry",
+            "hybrid_score",
+            "value_score", "quality_score", "risk_score", "contrarian_score", "momentum_score",
+            "last_price",
+            "trailingPE", "forwardPE", "priceToBook", "returnOnEquity", "fcfYield",
+            "ann_vol", "max_drawdown", "current_drawdown", "rsi14",
+            "ret_6m", "ret_12m", "gap_50ma", "gap_200ma",
+            "marketCapB", "pass_filters",
+        ]
+        show_cols = [c for c in show_cols if c in screen_df.columns]
+
+        st.dataframe(
+            screen_df[show_cols].sort_values("hybrid_score", ascending=False),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        st.markdown("### Top candidates")
+        top_preview = screen_df.sort_values("hybrid_score", ascending=False).head(10)
+        for _, row in top_preview.iterrows():
+            st.markdown(
+                f"**{row['ticker']} — {row.get('name', '')}**  \n"
+                f"Score: {row['hybrid_score']:.3f} | Sector: {row.get('sector', '-') or '-'} | "
+                f"ROE: {format_pct(row.get('returnOnEquity'))} | "
+                f"Current DD: {format_pct(row.get('current_drawdown'))} | "
+                f"6M: {format_pct(row.get('ret_6m'))}  \n"
+                f"{factor_interpretation(row, regime)}"
+            )
 
 # ============================================================
-# Tab 3 - Equity Stress
+# Tab 3: Portfolio
 # ============================================================
 with tab3:
-    st.markdown("### Equity Stress and Relative Performance")
+    st.subheader("Suggested Portfolio")
 
-    perf_df = pd.DataFrame(index=prices.index)
-    for t in ["SPY", "QQQ", "TLT", "GLD"]:
-        if t in prices.columns:
-            perf_df[t] = normalize_to_100(prices[t])
-
-    if not perf_df.empty:
-        fig = line_chart(perf_df, "Relative Performance (Base=100)", "Normalized")
-        st.plotly_chart(fig, use_container_width=True)
+    if portfolio_df.empty:
+        st.warning("No portfolio candidates available.")
     else:
-        st.info("Not enough price data.")
+        port_show = portfolio_df[
+            [
+                "ticker", "name", "sector", "hybrid_score",
+                "target_weight", "value_score", "quality_score",
+                "risk_score", "contrarian_score", "momentum_score",
+                "current_drawdown", "ret_6m", "ret_12m"
+            ]
+        ].copy()
 
-    dd_df = pd.DataFrame(index=prices.index)
-    for t in ["SPY", "QQQ"]:
-        if t in prices.columns:
-            dd_df[f"{t} Drawdown"] = compute_drawdown(prices[t])
+        st.dataframe(port_show, use_container_width=True, hide_index=True)
 
-    if not dd_df.empty:
-        fig = line_chart(dd_df, "Drawdown vs Previous Peak", "Drawdown (%)")
-        fig.add_hline(y=0, line_dash="dash")
-        st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.info("Drawdown data unavailable.")
+        fig_w = go.Figure(
+            data=[
+                go.Bar(
+                    x=portfolio_df["ticker"],
+                    y=portfolio_df["target_weight"],
+                    text=[f"{w:.1%}" for w in portfolio_df["target_weight"]],
+                    textposition="auto",
+                    name="Target Weight",
+                )
+            ]
+        )
+        fig_w.update_layout(
+            title="Target Portfolio Weights",
+            xaxis_title="Ticker",
+            yaxis_title="Weight",
+            height=450,
+        )
+        st.plotly_chart(fig_w, use_container_width=True)
+
+        st.markdown("### Howard Marks style portfolio logic")
+        st.write(
+            f"- Current macro regime: **{regime}**\n"
+            f"- Suggested equity allocation: **{positioning['equity']:.0%}**\n"
+            f"- Suggested cash allocation: **{positioning['cash']:.0%}**\n"
+            f"- Selection logic: **Value + Quality + Risk Control + Contrarian + Momentum**"
+        )
 
 # ============================================================
-# Tab 4 - Allocation
+# Tab 4: Chart Lab
 # ============================================================
 with tab4:
-    st.markdown("### Allocation Hint")
+    st.subheader("Chart Lab")
 
-    st.dataframe(allocation_df, use_container_width=True, hide_index=True)
+    if quant_df.empty or prices.empty:
+        st.warning("No chart data available.")
+    else:
+        candidate_list = quant_df["ticker"].head(20).tolist()
+        selected_chart_ticker = st.selectbox("Select ticker", candidate_list, index=0)
 
-    alloc_fig = bar_chart(allocation_df, "Asset", "Suggested Weight (%)", "Suggested Allocation")
-    st.plotly_chart(alloc_fig, use_container_width=True)
+        c1, c2 = st.columns(2)
+        with c1:
+            st.plotly_chart(make_mva_chart(prices, selected_chart_ticker), use_container_width=True)
 
-    st.markdown(
-        """
-**Reading guide**
-- **Defensive**: focus on quality, patience, and liquidity
-- **Neutral**: stay balanced and avoid chasing
-- **Opportunistic**: scale in gradually when fear expands
-- These weights are **educational hints**, not personalized investment advice
-"""
-    )
+        with c2:
+            pfig, dfig = make_drawdown_chart(prices, selected_chart_ticker)
+            st.plotly_chart(dfig, use_container_width=True)
+
+        st.markdown("### Relative performance: Top portfolio candidates")
+        if not portfolio_df.empty:
+            top_tickers = portfolio_df["ticker"].tolist()
+            st.plotly_chart(
+                make_price_chart(prices, top_tickers, "Relative Price Performance (Indexed to 100)"),
+                use_container_width=True,
+            )
 
 # ============================================================
-# Tab 5 - Watchlist Screener
+# Tab 5: Raw Data
 # ============================================================
 with tab5:
-    st.markdown("### Top Opportunity Watchlist")
+    st.subheader("Raw data")
 
-    if watchlist_df.empty:
-        st.warning("Watchlist results unavailable.")
-    else:
-        show_df = watchlist_df.head(show_top_n).copy()
-        num_cols = [c for c in show_df.columns if c != "Ticker"]
-        show_df[num_cols] = show_df[num_cols].round(2)
-        st.dataframe(show_df, use_container_width=True, hide_index=True)
+    with st.expander("FRED macro data"):
+        st.dataframe(macro_hist.tail(50), use_container_width=True)
 
-        fig = bar_chart(show_df, "Ticker", "Opportunity Score", "Watchlist Opportunity Score")
-        st.plotly_chart(fig, use_container_width=True)
+    with st.expander("Price data"):
+        st.dataframe(prices.tail(50), use_container_width=True)
 
-        selected_ticker = st.selectbox("Select ticker for detailed chart", show_df["Ticker"].tolist())
+    with st.expander("Fundamentals"):
+        st.dataframe(fundamentals, use_container_width=True)
 
-        if selected_ticker in prices.columns:
-            s = prices[selected_ticker].dropna()
-            ma50 = moving_average(s, 50)
-            ma200 = moving_average(s, 200)
-
-            chart_df = pd.DataFrame({
-                selected_ticker: s,
-                "50DMA": ma50,
-                "200DMA": ma200,
-            }).dropna(how="all")
-
-            fig = line_chart(chart_df, f"{selected_ticker} Price with 50DMA / 200DMA", "Price")
-            st.plotly_chart(fig, use_container_width=True)
-
-            dd = compute_drawdown(s)
-            if not dd.empty:
-                fig = line_chart(dd.to_frame(f"{selected_ticker} Drawdown"), f"{selected_ticker} Drawdown", "Drawdown (%)")
-                fig.add_hline(y=0, line_dash="dash")
-                st.plotly_chart(fig, use_container_width=True)
+    with st.expander("Quant table"):
+        st.dataframe(quant_df, use_container_width=True)
 
 # ============================================================
-# Tab 6 - Playbook
-# ============================================================
-with tab6:
-    st.markdown("### Howard Marks Style Playbook")
-
-    st.write(f"**Current Regime:** {regime}")
-    st.write(f"**Action Signal:** {action_signal}")
-
-    if regime == "Defensive":
-        st.markdown(
-            """
-#### Suggested stance
-- Reduce aggressive beta exposure
-- Prefer strong balance sheets
-- Avoid expensive narratives
-- Maintain dry powder
-- Watch credit stress carefully
-
-#### Practical reading
-This is a time to protect capital first. Still, sharp dislocations in high-quality names may justify selective accumulation.
-"""
-        )
-    elif regime == "Neutral":
-        st.markdown(
-            """
-#### Suggested stance
-- Stay balanced
-- Add selectively on weakness
-- Focus on profitable and durable businesses
-- Avoid emotional market timing
-- Let valuation guide position sizing
-
-#### Practical reading
-This is not an environment for extreme positioning. Build quality exposure gradually and stay disciplined.
-"""
-        )
-    elif regime == "Opportunistic":
-        st.markdown(
-            """
-#### Suggested stance
-- Screen forced-selling opportunities
-- Scale in gradually, not all at once
-- Prefer quality companies with strong cash flows
-- Buy fear, but only with valuation discipline
-- Monitor whether macro stress is stabilizing
-
-#### Practical reading
-Fear can create opportunity, but it is critical to distinguish temporary panic from permanent business deterioration.
-"""
-        )
-    else:
-        st.info("Insufficient regime data.")
-
-    checklist_df = pd.DataFrame({
-        "Question": [
-            "Is fear high?",
-            "Are credit spreads widening?",
-            "Is the market already pricing bad news?",
-            "Is business quality still intact?",
-            "Can I scale in instead of betting all at once?"
-        ],
-        "Why It Matters": [
-            "Fear creates dislocations.",
-            "Credit often leads equity stress.",
-            "Price vs value is the core question.",
-            "Weak balance sheets break first.",
-            "Gradual entries reduce timing risk."
-        ]
-    })
-    st.dataframe(checklist_df, use_container_width=True, hide_index=True)
-
-# ============================================================
-# Bottom Notes
+# Footer
 # ============================================================
 st.markdown("---")
 st.markdown(
     """
-### Notes
-- This is a **market regime / risk awareness dashboard**, not a guaranteed timing tool.
-- Howard Marks style investing is about:
-  - understanding cycles,
-  - controlling risk,
-  - comparing price vs value,
-  - and acting rationally when others are emotional.
-- Best used together with:
-  - a macro dashboard,
-  - an MDD screen,
-  - quality / ROE / FCF analysis,
-  - and staged buying rules.
+**Notes**
+- This app is an educational/research tool, not investment advice.
+- `yfinance` fundamentals can be incomplete or delayed for some tickers.
+- Howard Marks style interpretation here is translated into a quant framework:
+  **Cycle awareness + risk control + value discipline + contrarian behavior + trend confirmation**.
 """
 )
