@@ -28,6 +28,7 @@
 #   * candidate stocks / ETFs
 #   * charts
 # - Simple regime scoring
+# - Plotly key collision fixed
 #
 # Install:
 #   pip install streamlit yfinance pandas numpy plotly
@@ -38,8 +39,6 @@
 
 from __future__ import annotations
 
-import math
-from datetime import datetime, timedelta
 from typing import Dict, List, Tuple
 
 import numpy as np
@@ -58,9 +57,7 @@ st.set_page_config(
 )
 
 st.title("📊 Guru Investor Strategy Dashboard")
-st.caption(
-    "Analyze the current market through the strategies of 10 top guru investors"
-)
+st.caption("Analyze the current market through the strategies of 10 top guru investors")
 
 # ============================================================
 # Sidebar
@@ -94,7 +91,8 @@ risk_free_proxy = st.sidebar.selectbox(
 
 show_raw_data = st.sidebar.checkbox("Show raw downloaded data", value=False)
 
-refresh_button = st.sidebar.button("🔄 Refresh Data")
+if st.sidebar.button("🔄 Refresh Data"):
+    st.cache_data.clear()
 
 # ============================================================
 # Universe / proxies
@@ -116,6 +114,8 @@ MARKET_TICKERS = {
     "SOXX": "Semiconductor ETF",
     "ARKK": "ARK Innovation ETF",
     "VIXY": "VIX Short-Term Futures ETF",
+    "XLP": "Consumer Staples ETF",
+    "LQD": "Investment Grade Corporate Bond ETF",
 }
 
 GURU_CANDIDATES = {
@@ -131,7 +131,13 @@ GURU_CANDIDATES = {
     "Tudor": ["GLD", "DBC", "USO", "XLE", "TLT", "SPY"],
 }
 
-ALL_TICKERS = sorted(set(list(MARKET_TICKERS.keys()) + sum(GURU_CANDIDATES.values(), []) + [benchmark, risk_free_proxy]))
+ALL_TICKERS = sorted(
+    set(
+        list(MARKET_TICKERS.keys())
+        + sum(GURU_CANDIDATES.values(), [])
+        + [benchmark, risk_free_proxy]
+    )
+)
 
 # ============================================================
 # Utility functions
@@ -171,10 +177,11 @@ def extract_close_matrix(raw: pd.DataFrame, tickers: List[str]) -> pd.DataFrame:
             except Exception:
                 pass
         return pd.DataFrame(closes)
-    else:
-        if "Close" in raw.columns and len(tickers) == 1:
-            return pd.DataFrame({tickers[0]: raw["Close"]})
-        return pd.DataFrame()
+
+    if "Close" in raw.columns and len(tickers) == 1:
+        return pd.DataFrame({tickers[0]: raw["Close"]})
+
+    return pd.DataFrame()
 
 
 def extract_volume_matrix(raw: pd.DataFrame, tickers: List[str]) -> pd.DataFrame:
@@ -189,14 +196,16 @@ def extract_volume_matrix(raw: pd.DataFrame, tickers: List[str]) -> pd.DataFrame
             except Exception:
                 pass
         return pd.DataFrame(vols)
-    else:
-        if "Volume" in raw.columns and len(tickers) == 1:
-            return pd.DataFrame({tickers[0]: raw["Volume"]})
-        return pd.DataFrame()
+
+    if "Volume" in raw.columns and len(tickers) == 1:
+        return pd.DataFrame({tickers[0]: raw["Volume"]})
+
+    return pd.DataFrame()
 
 
 def compute_return_metrics(price: pd.Series) -> Dict[str, float]:
     s = price.dropna().copy()
+
     if len(s) < 30:
         return {
             "last": np.nan,
@@ -230,30 +239,12 @@ def compute_return_metrics(price: pd.Series) -> Dict[str, float]:
     today = s.index[-1]
     current_year = today.year
     year_start = s[s.index.year == current_year]
-    if len(year_start) > 1:
-        out["ytd_return"] = (s.iloc[-1] / year_start.iloc[0] - 1.0) * 100
-    else:
-        out["ytd_return"] = np.nan
+    out["ytd_return"] = (s.iloc[-1] / year_start.iloc[0] - 1.0) * 100 if len(year_start) > 1 else np.nan
 
-    if len(s) >= 126:
-        out["sixm_return"] = (s.iloc[-1] / s.iloc[-126] - 1.0) * 100
-    else:
-        out["sixm_return"] = np.nan
-
-    if len(s) >= 252:
-        out["oney_return"] = (s.iloc[-1] / s.iloc[-252] - 1.0) * 100
-    else:
-        out["oney_return"] = np.nan
-
-    if len(s) >= 63:
-        out["momentum_3m"] = (s.iloc[-1] / s.iloc[-63] - 1.0) * 100
-    else:
-        out["momentum_3m"] = np.nan
-
-    if len(s) >= 126:
-        out["momentum_6m"] = (s.iloc[-1] / s.iloc[-126] - 1.0) * 100
-    else:
-        out["momentum_6m"] = np.nan
+    out["sixm_return"] = (s.iloc[-1] / s.iloc[-126] - 1.0) * 100 if len(s) >= 126 else np.nan
+    out["oney_return"] = (s.iloc[-1] / s.iloc[-252] - 1.0) * 100 if len(s) >= 252 else np.nan
+    out["momentum_3m"] = (s.iloc[-1] / s.iloc[-63] - 1.0) * 100 if len(s) >= 63 else np.nan
+    out["momentum_6m"] = (s.iloc[-1] / s.iloc[-126] - 1.0) * 100 if len(s) >= 126 else np.nan
 
     return out
 
@@ -264,6 +255,7 @@ def relative_performance(price: pd.Series, bench: pd.Series) -> pd.Series:
     df = pd.concat([s1, s2], axis=1).dropna()
     if df.empty:
         return pd.Series(dtype=float)
+
     rel = (df.iloc[:, 0] / df.iloc[:, 0].iloc[0]) / (df.iloc[:, 1] / df.iloc[:, 1].iloc[0])
     return rel
 
@@ -316,7 +308,6 @@ def score_market_regime(metrics: Dict[str, Dict[str, float]]) -> Tuple[int, str,
             score_details["Commodity Pressure"] -= 1
         else:
             score_details["Commodity Pressure"] += 1
-
     except Exception:
         pass
 
@@ -433,6 +424,7 @@ def make_drawdown_chart(prices: pd.DataFrame, ticker: str) -> go.Figure:
 
 def make_compare_chart(prices: pd.DataFrame, tickers: List[str], title: str) -> go.Figure:
     fig = go.Figure()
+
     for t in tickers:
         if t in prices.columns:
             s = normalize_series(prices[t])
@@ -466,7 +458,7 @@ def format_num(x) -> str:
 
 def get_fundamental_snapshot(ticker: str) -> Dict[str, float | str]:
     info = download_info(ticker)
-    snapshot = {
+    return {
         "shortName": info.get("shortName", ticker),
         "sector": info.get("sector", "N/A"),
         "industry": info.get("industry", "N/A"),
@@ -487,7 +479,6 @@ def get_fundamental_snapshot(ticker: str) -> Dict[str, float | str]:
         "dividendYield": info.get("dividendYield", np.nan),
         "longBusinessSummary": info.get("longBusinessSummary", ""),
     }
-    return snapshot
 
 
 def metrics_table_for_tickers(prices: pd.DataFrame, tickers: List[str]) -> pd.DataFrame:
@@ -495,35 +486,40 @@ def metrics_table_for_tickers(prices: pd.DataFrame, tickers: List[str]) -> pd.Da
     for t in tickers:
         if t not in prices.columns:
             continue
+
         m = compute_return_metrics(prices[t])
         f = get_fundamental_snapshot(t)
-        rows.append({
-            "Ticker": t,
-            "Name": f["shortName"],
-            "Sector": f["sector"],
-            "Price": m["last"],
-            "YTD %": m["ytd_return"],
-            "6M %": m["sixm_return"],
-            "1Y %": m["oney_return"],
-            "Dist vs MA50 %": m["distance_50"],
-            "Dist vs MA200 %": m["distance_200"],
-            "MDD %": m["mdd"],
-            "Vol 20D Ann. %": m["vol_20d"],
-            "PE": f["trailingPE"],
-            "Forward PE": f["forwardPE"],
-            "PEG": f["pegRatio"],
-            "P/B": f["priceToBook"],
-            "ROE %": f["returnOnEquity"] * 100 if pd.notna(f["returnOnEquity"]) else np.nan,
-            "Revenue Growth %": f["revenueGrowth"] * 100 if pd.notna(f["revenueGrowth"]) else np.nan,
-            "Debt/Equity": f["debtToEquity"],
-        })
-    df = pd.DataFrame(rows)
-    return df
+
+        rows.append(
+            {
+                "Ticker": t,
+                "Name": f["shortName"],
+                "Sector": f["sector"],
+                "Price": m["last"],
+                "YTD %": m["ytd_return"],
+                "6M %": m["sixm_return"],
+                "1Y %": m["oney_return"],
+                "Dist vs MA50 %": m["distance_50"],
+                "Dist vs MA200 %": m["distance_200"],
+                "MDD %": m["mdd"],
+                "Vol 20D Ann. %": m["vol_20d"],
+                "PE": f["trailingPE"],
+                "Forward PE": f["forwardPE"],
+                "PEG": f["pegRatio"],
+                "P/B": f["priceToBook"],
+                "ROE %": f["returnOnEquity"] * 100 if pd.notna(f["returnOnEquity"]) else np.nan,
+                "Revenue Growth %": f["revenueGrowth"] * 100 if pd.notna(f["revenueGrowth"]) else np.nan,
+                "Debt/Equity": f["debtToEquity"],
+            }
+        )
+
+    return pd.DataFrame(rows)
 
 
 def render_fundamental_card(ticker: str):
     f = get_fundamental_snapshot(ticker)
     st.markdown(f"### {ticker} — {f['shortName']}")
+
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Sector", f"{f['sector']}")
     c2.metric("Industry", f"{f['industry']}")
@@ -544,9 +540,6 @@ def render_fundamental_card(ticker: str):
 # ============================================================
 # Download data
 # ============================================================
-if refresh_button:
-    st.cache_data.clear()
-
 with st.spinner("Downloading market data..."):
     raw_data = download_price_data(ALL_TICKERS, period=selected_period)
     prices = extract_close_matrix(raw_data, ALL_TICKERS)
@@ -591,9 +584,10 @@ st.plotly_chart(
     make_compare_chart(
         prices,
         ["SPY", "QQQ", "TLT", "GLD", "DBC"],
-        "Normalized Performance: Equities vs Bonds vs Gold vs Commodities"
+        "Normalized Performance: Equities vs Bonds vs Gold vs Commodities",
     ),
     use_container_width=True,
+    key="top_market_snapshot_compare_chart",
 )
 
 # ============================================================
@@ -616,7 +610,7 @@ def global_market_commentary(regime_label: str, metrics: Dict[str, Dict[str, flo
     else:
         comments.append("The market is showing late-cycle or defensive behavior, with higher fragility beneath the surface.")
 
-    if pd.notna(qqq_200) and qqq_200 > spy_200:
+    if pd.notna(qqq_200) and pd.notna(spy_200) and qqq_200 > spy_200:
         comments.append("Growth / technology leadership is stronger than the broad market.")
     if pd.notna(soxx_6m) and soxx_6m > 0:
         comments.append("Semiconductor momentum still supports the AI / compute narrative.")
@@ -848,11 +842,9 @@ def guru_interpretation(guru: str, market_metrics: Dict[str, Dict[str, float]]) 
     gld = market_metrics["GLD"]
     uso = market_metrics["USO"]
     soxx = market_metrics["SOXX"]
-    xlv = market_metrics["XLV"]
-    xlk = market_metrics["XLK"]
 
     if guru == "Warren Buffett":
-        if qqq["distance_200"] > 10:
+        if pd.notna(qqq["distance_200"]) and qqq["distance_200"] > 10:
             return (
                 "A Buffett-style view would likely say the market contains strong businesses, "
                 "but parts of large-cap growth may be priced for very optimistic outcomes. "
@@ -864,7 +856,7 @@ def guru_interpretation(guru: str, market_metrics: Dict[str, Dict[str, float]]) 
         )
 
     if guru == "Ray Dalio":
-        if gld["sixm_return"] > 0 and uso["sixm_return"] > 0:
+        if pd.notna(gld["sixm_return"]) and pd.notna(uso["sixm_return"]) and gld["sixm_return"] > 0 and uso["sixm_return"] > 0:
             return (
                 "A Dalio-style view sees persistent macro uncertainty: inflation hedges are still relevant, "
                 "so diversification across equities, bonds, gold, and commodities remains important."
@@ -875,7 +867,7 @@ def guru_interpretation(guru: str, market_metrics: Dict[str, Dict[str, float]]) 
         )
 
     if guru == "Howard Marks":
-        if qqq["distance_200"] > 10 and soxx["sixm_return"] > 20:
+        if pd.notna(qqq["distance_200"]) and pd.notna(soxx["sixm_return"]) and qqq["distance_200"] > 10 and soxx["sixm_return"] > 20:
             return (
                 "A Marks-style reading suggests the market is in an optimistic phase. "
                 "That does not automatically mean an imminent crash, but it argues for greater selectivity and risk control."
@@ -886,17 +878,15 @@ def guru_interpretation(guru: str, market_metrics: Dict[str, Dict[str, float]]) 
         )
 
     if guru == "Stanley Druckenmiller":
-        if soxx["sixm_return"] > 0 and qqq["distance_200"] > 0:
+        if pd.notna(soxx["sixm_return"]) and pd.notna(qqq["distance_200"]) and soxx["sixm_return"] > 0 and qqq["distance_200"] > 0:
             return (
                 "A Druckenmiller-style view would probably stay constructive on the dominant trend: "
                 "AI infrastructure, semiconductor leadership, and strong growth franchises."
             )
-        return (
-            "A Druckenmiller-style view would wait for clearer trend confirmation before building aggressive positions."
-        )
+        return "A Druckenmiller-style view would wait for clearer trend confirmation before building aggressive positions."
 
     if guru == "George Soros":
-        if qqq["distance_200"] > 10 and gld["sixm_return"] > 0:
+        if pd.notna(qqq["distance_200"]) and pd.notna(gld["sixm_return"]) and qqq["distance_200"] > 10 and gld["sixm_return"] > 0:
             return (
                 "A Soros-style lens sees a powerful narrative driving prices higher, but also watches for instability. "
                 "When both risk assets and hedges rise together, the system may be more fragile than it looks."
@@ -913,17 +903,15 @@ def guru_interpretation(guru: str, market_metrics: Dict[str, Dict[str, float]]) 
         )
 
     if guru == "Jim Simons":
-        if qqq["momentum_6m"] > 0 and spy["momentum_6m"] > 0:
+        if pd.notna(qqq["momentum_6m"]) and pd.notna(spy["momentum_6m"]) and qqq["momentum_6m"] > 0 and spy["momentum_6m"] > 0:
             return (
                 "A Simons-style system would likely classify the market as trend-friendly, "
                 "while also ranking assets by momentum, volatility, and relative strength rather than stories."
             )
-        return (
-            "A Simons-style system would probably reduce trend exposure and rely more on diversified signal blending."
-        )
+        return "A Simons-style system would probably reduce trend exposure and rely more on diversified signal blending."
 
     if guru == "Cathie Wood":
-        if qqq["distance_200"] > 0 and soxx["sixm_return"] > 0:
+        if pd.notna(qqq["distance_200"]) and pd.notna(soxx["sixm_return"]) and qqq["distance_200"] > 0 and soxx["sixm_return"] > 0:
             return (
                 "A Cathie Wood-style framework remains positive on innovation leadership, "
                 "especially where AI and software platforms can scale rapidly over several years."
@@ -934,17 +922,15 @@ def guru_interpretation(guru: str, market_metrics: Dict[str, Dict[str, float]]) 
         )
 
     if guru == "Michael Burry":
-        if qqq["distance_200"] > 10:
+        if pd.notna(qqq["distance_200"]) and qqq["distance_200"] > 10:
             return (
                 "A Burry-style interpretation would warn that enthusiasm, valuation stretch, and crowded positioning "
                 "can create downside asymmetry even while prices still look strong."
             )
-        return (
-            "A Burry-style interpretation would stay skeptical and continue screening for hidden fragility under the surface."
-        )
+        return "A Burry-style interpretation would stay skeptical and continue screening for hidden fragility under the surface."
 
     if guru == "Paul Tudor Jones":
-        if gld["sixm_return"] > 0 or uso["sixm_return"] > 10:
+        if (pd.notna(gld["sixm_return"]) and gld["sixm_return"] > 0) or (pd.notna(uso["sixm_return"]) and uso["sixm_return"] > 10):
             return (
                 "A Paul Tudor Jones-style approach sees inflation and macro hedging as essential. "
                 "Trend matters, but capital protection and optionality matter more."
@@ -958,11 +944,6 @@ def guru_interpretation(guru: str, market_metrics: Dict[str, Dict[str, float]]) 
 
 
 def suggested_action_by_guru(guru: str, market_metrics: Dict[str, Dict[str, float]]) -> str:
-    spy = market_metrics["SPY"]
-    qqq = market_metrics["QQQ"]
-    gld = market_metrics["GLD"]
-    uso = market_metrics["USO"]
-
     if guru == "Warren Buffett":
         return "Prefer quality compounders, hold some cash, and avoid chasing the most extended speculative names."
     if guru == "Ray Dalio":
@@ -983,7 +964,6 @@ def suggested_action_by_guru(guru: str, market_metrics: Dict[str, Dict[str, floa
         return "Raise defense, keep hedges, and avoid assuming that strong performance means low risk."
     if guru == "Paul Tudor Jones":
         return "Combine trend participation with gold, commodities, and disciplined risk limits."
-
     return "No action defined."
 
 
@@ -1005,7 +985,7 @@ def render_guru_tab(guru_name: str, prices: pd.DataFrame, benchmark_ticker: str)
     st.markdown("### Key Indicators")
     indicator_cols = st.columns(len(meta["indicators"]))
     for i, ind in enumerate(meta["indicators"]):
-        indicator_cols[i].metric(f"Indicator {i+1}", ind)
+        indicator_cols[i].metric(f"Indicator {i + 1}", ind)
 
     st.markdown("### Suggested Positioning")
     portfolio_df = pd.DataFrame(
@@ -1015,6 +995,10 @@ def render_guru_tab(guru_name: str, prices: pd.DataFrame, benchmark_ticker: str)
 
     st.markdown("### Candidate Assets")
     available_candidates = [t for t in candidates if t in prices.columns]
+
+    if not available_candidates:
+        st.warning(f"No available price data for {guru_name} candidate assets.")
+        return
 
     metrics_df = metrics_table_for_tickers(prices, available_candidates)
 
@@ -1035,7 +1019,6 @@ def render_guru_tab(guru_name: str, prices: pd.DataFrame, benchmark_ticker: str)
         metrics_df = metrics_df.sort_values(sort_col, ascending=ascending)
 
     st.dataframe(metrics_df, use_container_width=True, hide_index=True)
-
     st.markdown("### Suggested Action")
     st.success(suggested_action_by_guru(guru_name, market_metrics))
 
@@ -1048,20 +1031,33 @@ def render_guru_tab(guru_name: str, prices: pd.DataFrame, benchmark_ticker: str)
     )
 
     c1, c2 = st.columns(2)
+
     with c1:
-        st.plotly_chart(
-            make_price_chart(prices, selected_ticker, title=f"{selected_ticker} Price Trend", show_ma=True),
-            use_container_width=True
+        fig_price = make_price_chart(
+            prices,
+            selected_ticker,
+            title=f"{selected_ticker} Price Trend",
+            show_ma=True,
         )
-    with c2:
         st.plotly_chart(
-            make_relative_chart(prices, selected_ticker, benchmark_ticker),
-            use_container_width=True
+            fig_price,
+            use_container_width=True,
+            key=f"{guru_name}_{selected_ticker}_price_chart",
         )
 
+    with c2:
+        fig_relative = make_relative_chart(prices, selected_ticker, benchmark_ticker)
+        st.plotly_chart(
+            fig_relative,
+            use_container_width=True,
+            key=f"{guru_name}_{selected_ticker}_{benchmark_ticker}_relative_chart",
+        )
+
+    fig_drawdown = make_drawdown_chart(prices, selected_ticker)
     st.plotly_chart(
-        make_drawdown_chart(prices, selected_ticker),
-        use_container_width=True
+        fig_drawdown,
+        use_container_width=True,
+        key=f"{guru_name}_{selected_ticker}_drawdown_chart",
     )
 
     st.markdown("### Fundamentals / Business Snapshot")
@@ -1069,13 +1065,15 @@ def render_guru_tab(guru_name: str, prices: pd.DataFrame, benchmark_ticker: str)
 
     st.markdown("### Group Comparison")
     top_compare = available_candidates[: min(5, len(available_candidates))]
+    fig_compare = make_compare_chart(
+        prices,
+        top_compare,
+        f"{guru_name} Candidate Basket Comparison",
+    )
     st.plotly_chart(
-        make_compare_chart(
-            prices,
-            top_compare,
-            f"{guru_name} Candidate Basket Comparison"
-        ),
-        use_container_width=True
+        fig_compare,
+        use_container_width=True,
+        key=f"{guru_name}_group_compare_chart",
     )
 
 
@@ -1095,7 +1093,6 @@ tab_names = [
     "Michael Burry",
     "Paul Tudor Jones",
 ]
-
 tabs = st.tabs(tab_names)
 
 # ============================================================
@@ -1106,13 +1103,15 @@ with tabs[0]:
 
     overview_rows = []
     for guru_name, meta in GURU_META.items():
-        overview_rows.append({
-            "Guru": guru_name,
-            "Strategy": meta["strategy"],
-            "Core Focus": meta["focus"],
-            "Current Interpretation": guru_interpretation(guru_name, market_metrics),
-            "Suggested Action": suggested_action_by_guru(guru_name, market_metrics),
-        })
+        overview_rows.append(
+            {
+                "Guru": guru_name,
+                "Strategy": meta["strategy"],
+                "Core Focus": meta["focus"],
+                "Current Interpretation": guru_interpretation(guru_name, market_metrics),
+                "Suggested Action": suggested_action_by_guru(guru_name, market_metrics),
+            }
+        )
 
     overview_df = pd.DataFrame(overview_rows)
     st.dataframe(overview_df, use_container_width=True, hide_index=True)
@@ -1121,51 +1120,58 @@ with tabs[0]:
     cross_rows = []
     for t in ["SPY", "QQQ", "TLT", "GLD", "DBC", "USO", "XLK", "XLV", "SOXX"]:
         m = compute_return_metrics(prices[t])
-        cross_rows.append({
-            "Ticker": t,
-            "Name": MARKET_TICKERS.get(t, t),
-            "Price": m["last"],
-            "YTD %": m["ytd_return"],
-            "6M %": m["sixm_return"],
-            "1Y %": m["oney_return"],
-            "Dist vs MA50 %": m["distance_50"],
-            "Dist vs MA200 %": m["distance_200"],
-            "Max Drawdown %": m["mdd"],
-            "Volatility %": m["vol_20d"],
-        })
+        cross_rows.append(
+            {
+                "Ticker": t,
+                "Name": MARKET_TICKERS.get(t, t),
+                "Price": m["last"],
+                "YTD %": m["ytd_return"],
+                "6M %": m["sixm_return"],
+                "1Y %": m["oney_return"],
+                "Dist vs MA50 %": m["distance_50"],
+                "Dist vs MA200 %": m["distance_200"],
+                "Max Drawdown %": m["mdd"],
+                "Volatility %": m["vol_20d"],
+            }
+        )
+
     cross_df = pd.DataFrame(cross_rows)
     st.dataframe(cross_df, use_container_width=True, hide_index=True)
 
     c1, c2 = st.columns(2)
+
     with c1:
         st.plotly_chart(
             make_compare_chart(
                 prices,
                 ["SPY", "QQQ", "TLT", "GLD", "USO"],
-                "Cross-Asset Leadership"
+                "Cross-Asset Leadership",
             ),
-            use_container_width=True
+            use_container_width=True,
+            key="overview_cross_asset_chart",
         )
+
     with c2:
         st.plotly_chart(
             make_compare_chart(
                 prices,
                 ["XLK", "XLV", "XLE", "XLF", "SOXX"],
-                "Sector / Theme Leadership"
+                "Sector / Theme Leadership",
             ),
-            use_container_width=True
+            use_container_width=True,
+            key="overview_sector_theme_chart",
         )
 
     st.markdown("### Strategic Summary")
     st.write(
         f"""
-        - **Current regime:** {regime_label}
-        - **Broad market trend:** SPY vs MA200 = {format_pct(market_metrics['SPY']['distance_200'])}
-        - **Growth leadership:** QQQ vs MA200 = {format_pct(market_metrics['QQQ']['distance_200'])}
-        - **AI / semiconductor momentum:** SOXX 6M = {format_pct(market_metrics['SOXX']['sixm_return'])}
-        - **Macro hedge behavior:** GLD 6M = {format_pct(market_metrics['GLD']['sixm_return'])}
-        - **Inflation / energy pressure:** USO 6M = {format_pct(market_metrics['USO']['sixm_return'])}
-        """
+- **Current regime:** {regime_label}  
+- **Broad market trend:** SPY vs MA200 = {format_pct(market_metrics['SPY']['distance_200'])}  
+- **Growth leadership:** QQQ vs MA200 = {format_pct(market_metrics['QQQ']['distance_200'])}  
+- **AI / semiconductor momentum:** SOXX 6M = {format_pct(market_metrics['SOXX']['sixm_return'])}  
+- **Macro hedge behavior:** GLD 6M = {format_pct(market_metrics['GLD']['sixm_return'])}  
+- **Inflation / energy pressure:** USO 6M = {format_pct(market_metrics['USO']['sixm_return'])}
+"""
     )
 
 # ============================================================
